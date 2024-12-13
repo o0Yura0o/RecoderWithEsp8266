@@ -16,7 +16,9 @@ const int SampleRate = 16000;
 volatile boolean buffFull[2] = {false,false}, whichBuff = false, a;
 volatile byte buffer[2][buffSize];
 volatile int buffCount = 0;
+uint8_t buffer2[buffSize];
 
+unsigned long dataSize = 0, pre = 0;
 uint16_t pcmValue = 0;
 int touchSensor = 12;
 int sensorValue = 0;
@@ -31,14 +33,6 @@ void setup() {
   pinMode(A0, INPUT);
   pinMode(touchSensor, INPUT);
   setupFS(LittleFS);
-
-  // WiFi.begin(ssid, password);
-
-  // while (WiFi.status() != WL_CONNECTED) {
-  //     delay(1000);
-  //     Serial.println("Connecting to WiFi...");
-  // }
-  // Serial.println("Connected to WiFi");
 }
 
 void loop() {
@@ -53,8 +47,16 @@ void loop() {
       if(buffFull[whichBuff] && buffFull[!whichBuff]) Serial.println("data loss");
       if(buffFull[!whichBuff]){
         a = !whichBuff;
+        if (!f) {
+          Serial.printf("Unable to open file for writing, aborting\n");
+          return;
+        }
+        timer->stop();
         f.write((byte*)buffer[a], buffSize);
+        timer->start();
+        
         buffFull[a] = false;
+        
       }
       sensorValue = digitalRead(touchSensor);
     }
@@ -66,8 +68,10 @@ void loop() {
       Serial.print("File: ");
       Serial.print(dir.fileName());
       Serial.print(" | Size: ");
-      Serial.println(dir.fileSize());
+      dataSize = dir.fileSize();
+      Serial.println(dataSize);
     }
+    sendData();
   }
 }
 
@@ -83,13 +87,15 @@ void setupFS(FS fs) {
   Serial.println("FS setup success");
 }
 
-void sampleAndBuffer() {
+void IRAM_ATTR sampleAndBuffer() {
   system_adc_read_fast(&pcmValue, 1, 8);
+  
   buffer[whichBuff][buffCount++] = (pcmValue>>2) & 0xFF;
   if(buffCount >= buffSize){
     buffCount = 0;
     buffFull[whichBuff] = true;
     whichBuff = !whichBuff;
+    
   }
 }
 
@@ -106,35 +112,45 @@ void startR() {
   if(!timer) {
     timer = new AudioTimer();
     timer->setup(SampleRate, sampleAndBuffer);  //setup(tick, ISR_func)
-    
   }
   Serial.println("Start Recording");
+  pre = micros();
 	timer->start();
 }
 
 void stopR() {
   timer->stop();
+  pre = micros()-pre;
   Serial.println("Time stop");
   f.write((byte*)buffer[whichBuff], buffCount);
   f.close();
 }
 
-// void clearBuffer() {
-//   WiFiClient client;
-//   if (client.connect(serverIP, serverPort)){
-//     client.println("POST /upload_pcm HTTP/1.1");
-//     client.println("Host: " + String(serverIP));
-//     client.println("Content-Type: application/octet-stream");
-//     client.print("Content-Length: ");
-//     client.println(pcmIndex);
-//     Serial.print("DL: ");
-//     Serial.print(pcmIndex);
-//     Serial.print(", ");
-//     client.print("Batch-Time: ");  // Add the sample rate as a custom header
-//     client.println(20000);
-//     client.println();
-//     client.write(pcmBuffer, pcmIndex);
-//     client.stop();
-//   }
-//   pcmIndex = 0;
-// }
+void sendData() {
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+      delay(1000);
+      Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+
+  WiFiClient client;
+  if (client.connect(serverIP, serverPort)){
+    client.println("POST /upload_pcm HTTP/1.1");
+    client.println("Host: " + String(serverIP));
+    client.println("Content-Type: application/octet-stream");
+    client.print("Content-Length: ");
+    client.println(dataSize);
+    client.print("Batch-Time: ");  // Add the sample rate as a custom header
+    client.println(pre);
+    client.println();
+    f = LittleFS.open(filePath, "r");
+    for(int i=0;i<(dataSize/buffSize);i++){
+      f.read(buffer2, buffSize);
+      client.write(buffer2, buffSize);
+    }
+    client.stop();
+  }
+  Serial.println("All Done!!!");
+}
